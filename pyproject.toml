@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-9router-image"
+version = "0.1.0"
+description = "Hermes Agent image-generation provider plugin for 9Router"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "dhansxd" }]
+dependencies = ["requests>=2.28"]
+
+[project.entry-points."hermes_agent.plugins"]
+hermes_9router_image = "hermes_9router_image"
+
+[tool.setuptools.packages.find]
+where = ["src"]

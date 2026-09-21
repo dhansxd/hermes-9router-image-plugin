@@ -1,0 +1,5 @@
+name: 9router
+version: 0.1.0
+description: "9Router image generation backend. Text-to-image via a 9Router gateway."
+author: dhansxd
+kind: backend
