@@ -39,6 +39,8 @@ image_gen:
   9router:
     base_url: http://localhost:20128   # your 9Router gateway
     model: cf/@cf/black-forest-labs/flux-1-schnell
+    fallback_models:                   # tried in order, ONLY on 429/quota errors
+      - gemini/gemini-3-pro-image-preview
     timeout: 180
 ```
 
