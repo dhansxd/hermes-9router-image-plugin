@@ -5,9 +5,10 @@ Model selection: ``model`` kwarg → ``image_gen.9router.model`` → ``NINEROUTE
 → first model from the live ``/v1/models/image`` catalog (cached, TTL 300s).
 
 Config (``image_gen.9router`` in config.yaml, non-secret):
-    base_url   — gateway URL (default: ``NINEROUTER_URL`` env or ``http://localhost:20128``)
-    model      — default model id
-    timeout    — per-request timeout seconds (default 180)
+    base_url        — gateway URL (default: ``NINEROUTER_URL`` env or ``http://localhost:20128``)
+    model           — default model id
+    fallback_models — tried in order, ONLY on 429/quota errors of the previous model
+    timeout         — per-request timeout seconds (default 180)
 
 Secret: ``NINEROUTER_KEY`` (.env). Auth-free local gateways work without it.
 """
@@ -65,6 +66,25 @@ def _load_settings() -> Dict[str, Any]:
     scoped = cfg.get("image_gen") if isinstance(cfg, dict) else None
     scoped = scoped.get("9router") if isinstance(scoped, dict) else None
     return scoped if isinstance(scoped, dict) else {}
+
+
+def _is_quota_error(response_body: Any) -> bool:
+    """429/quota-style failure worth retrying on another model (user-chosen policy)."""
+    if not isinstance(response_body, dict):
+        return False
+    err = response_body.get("error")
+    if isinstance(err, dict):
+        message = str(err.get("message") or "").lower()
+        code = str(err.get("code") or "").lower()
+        status = str(err.get("status") or "").lower()
+        return (
+            status == "429"
+            or "429" in message
+            or "quota" in message
+            or "rate" in message and "limit" in message
+            or code in ("429", "rate_limit_exceeded", "insufficient_quota")
+        )
+    return response_body.get("status") == 429 or "429" in str(response_body.get("message", "")).lower()
 
 
 def _base_url(settings: Dict[str, Any]) -> str:
@@ -128,6 +148,30 @@ class NineRouterImageProvider(ImageGenProvider):
         models = self._fetch_models()
         return models[0] if models else None
 
+    def _model_chain(self, kwarg_model: Optional[str]) -> List[str]:
+        """Primary → fallback_models (deduped, order preserved). Fallbacks fire on 429/quota only."""
+        settings = _load_settings()
+        chain: List[str] = []
+        for candidate in (
+            kwarg_model,
+            str(settings.get("model") or "").strip(),
+            os.environ.get("NINEROUTER_IMAGE_MODEL", "").strip(),
+        ):
+            if candidate and candidate not in chain:
+                chain.append(candidate)
+        raw = settings.get("fallback_models")
+        if isinstance(raw, str):
+            raw = [raw]
+        for candidate in raw or []:
+            candidate = str(candidate).strip()
+            if candidate and candidate not in chain:
+                chain.append(candidate)
+        if not chain:
+            models = self._fetch_models()
+            if models:
+                chain.append(models[0])
+        return chain
+
     def get_setup_schema(self) -> Dict[str, Any]:
         return {
             "name": "9Router",
@@ -182,12 +226,8 @@ class NineRouterImageProvider(ImageGenProvider):
         settings = _load_settings()
         base = _base_url(settings)
         timeout = int(settings.get("timeout") or DEFAULT_TIMEOUT)
-        model_id = (
-            str(kwargs.get("model") or "").strip()
-            or self.default_model()
-            or ""
-        )
-        if not model_id:
+        chain = self._model_chain(str(kwargs.get("model") or "").strip() or None)
+        if not chain:
             return error_response(
                 error="No image model available on 9Router (catalog empty and no model configured)",
                 error_type="provider_error",
@@ -195,32 +235,62 @@ class NineRouterImageProvider(ImageGenProvider):
                 prompt=prompt,
                 aspect_ratio=aspect_ratio,
             )
-
-        # ponytail: some 9Router models (e.g. flux on Workers AI) reject `size`/`n` —
-        # aspect_ratio is then only advisory. Retry without extras on schema rejection.
-        size = _ASPECT_TO_SIZE.get(aspect_ratio, "1024x1024")
-        payload: Dict[str, Any] = {"model": model_id, "prompt": prompt, "size": size, "n": 1}
-        retry_payload: Optional[Dict[str, Any]] = {"model": model_id, "prompt": prompt}
         headers = {"Content-Type": "application/json"}
         api_key = _api_key()
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
+
+        # ponytail: some 9Router models (e.g. flux on Workers AI) reject `size`/`n` —
+        # aspect_ratio is then only advisory. Retry without extras on schema rejection.
+        size = _ASPECT_TO_SIZE.get(aspect_ratio, "1024x1024")
+        last_error: Optional[Dict[str, Any]] = None
+        for model_id in chain:
+            result = self._generate_one(
+                model_id, prompt, aspect_ratio, size=size,
+                base=base, headers=headers, timeout=timeout,
+            )
+            if result.get("success"):
+                return result
+            # Fallback policy (user-chosen): move to the next model ONLY on 429/quota.
+            if _is_quota_error(result.get("_quota_probe")):
+                logger.warning(
+                    "9Router model %s hit 429/quota; falling back to next model in chain", model_id
+                )
+                last_error = result
+                continue
+            return result
+        return last_error or error_response(  # pragma: no cover — chain non-empty guarantees a result
+            error="9Router request failed", error_type="provider_error",
+            provider=self.name, prompt=prompt, aspect_ratio=aspect_ratio,
+        )
+
+    def _generate_one(
+        self, model_id: str, prompt: str, aspect_ratio: str, *,
+        size: str, base: str, headers: Dict[str, Any], timeout: int,
+    ) -> Dict[str, Any]:
+        """One attempt against one model. Returns the uniform result dict.
+
+        On a quota-shaped error dict the result carries ``_quota_probe`` (the raw
+        error body) so the caller can decide on fallback without re-parsing.
+        """
+        payload: Dict[str, Any] = {"model": model_id, "prompt": prompt, "size": size, "n": 1}
+        retry_payload: Dict[str, Any] = {"model": model_id, "prompt": prompt}
+
+        def _fail(error: str, error_type: str, *, probe: Any = None) -> Dict[str, Any]:
+            out = error_response(
+                error=error, error_type=error_type, provider=self.name, model=model_id,
+                prompt=prompt, aspect_ratio=aspect_ratio,
+            )
+            if probe is not None:
+                out["_quota_probe"] = probe
+            return out
 
         try:
             response = _request_json(
                 "POST", f"{base}/v1/images/generations", headers=headers,
                 timeout=timeout, json_body=payload,
             )
-        except _SchemaRejected as exc:
-            if retry_payload is None:
-                return error_response(
-                    error=f"9Router request failed: {exc}",
-                    error_type=type(exc).__name__,
-                    provider=self.name,
-                    model=model_id,
-                    prompt=prompt,
-                    aspect_ratio=aspect_ratio,
-                )
+        except _SchemaRejected:
             logger.debug("9Router rejected size/n for %s; retrying bare payload", model_id)
             try:
                 response = _request_json(
@@ -228,45 +298,21 @@ class NineRouterImageProvider(ImageGenProvider):
                     timeout=timeout, json_body=retry_payload,
                 )
             except Exception as exc:  # noqa: BLE001 — surface every transport error to the tool result
-                return error_response(
-                    error=f"9Router request failed: {exc}",
-                    error_type=type(exc).__name__,
-                    provider=self.name,
-                    model=model_id,
-                    prompt=prompt,
-                    aspect_ratio=aspect_ratio,
-                )
+                return _fail(f"9Router request failed: {exc}", type(exc).__name__)
         except Exception as exc:  # noqa: BLE001 — surface every transport error to the tool result
-            return error_response(
-                error=f"9Router request failed: {exc}",
-                error_type=type(exc).__name__,
-                provider=self.name,
-                model=model_id,
-                prompt=prompt,
-                aspect_ratio=aspect_ratio,
-            )
+            return _fail(f"9Router request failed: {exc}", type(exc).__name__)
 
         err = response.get("error")
         if isinstance(err, dict):
-            return error_response(
-                error=str(err.get("message") or err),
-                error_type=str(err.get("type") or "provider_error"),
-                provider=self.name,
-                model=model_id,
-                prompt=prompt,
-                aspect_ratio=aspect_ratio,
+            return _fail(
+                str(err.get("message") or err),
+                str(err.get("type") or "provider_error"),
+                probe=response if _is_quota_error(response) else None,
             )
 
         data = response.get("data") or []
         if not data or not isinstance(data[0], dict):
-            return error_response(
-                error="9Router returned no image data",
-                error_type="provider_error",
-                provider=self.name,
-                model=model_id,
-                prompt=prompt,
-                aspect_ratio=aspect_ratio,
-            )
+            return _fail("9Router returned no image data", "provider_error")
         entry = data[0]
         if entry.get("url"):
             return success_response(
@@ -278,25 +324,11 @@ class NineRouterImageProvider(ImageGenProvider):
             )
         b64 = entry.get("b64_json")
         if not b64:
-            return error_response(
-                error="9Router response has neither url nor b64_json",
-                error_type="provider_error",
-                provider=self.name,
-                model=model_id,
-                prompt=prompt,
-                aspect_ratio=aspect_ratio,
-            )
+            return _fail("9Router response has neither url nor b64_json", "provider_error")
         try:
             path = save_b64_image(str(b64), prefix="9router", extension="png")
         except Exception as exc:  # noqa: BLE001 — decode/save failure must not raise
-            return error_response(
-                error=f"Failed to save generated image: {exc}",
-                error_type=type(exc).__name__,
-                provider=self.name,
-                model=model_id,
-                prompt=prompt,
-                aspect_ratio=aspect_ratio,
-            )
+            return _fail(f"Failed to save generated image: {exc}", type(exc).__name__)
         return success_response(
             image=str(path),
             model=model_id,

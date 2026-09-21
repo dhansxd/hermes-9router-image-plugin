@@ -147,6 +147,51 @@ def main() -> int:
     assert provider.default_model() == "fake/env-model"
     del os.environ["NINEROUTER_IMAGE_MODEL"]
 
+    # 7. Quota error on primary → falls back to next model; non-quota error → no fallback
+    tried = []
+
+    def quota_then_ok(method, url, headers, body):
+        tried.append(body.get("model"))
+        if url.endswith("/v1/models/image"):
+            return _Resp({"data": [{"id": "fake/model-a"}]})
+        if body.get("model") == "fake/primary":
+            return _Resp({"error": {"message": "429 quota exceeded", "type": "rate_limit"}}, status=429)
+        return _Resp({"created": 1, "data": [{"url": "https://example.com/fallback.png"}]})
+
+    _install_transport(quota_then_ok)
+    mod, provider = _load_provider()
+    chain = provider._model_chain("fake/primary")
+    assert chain == ["fake/primary"], chain
+    # simulate fallback_models config via a chain of two models
+    import hermes_9router_image as m
+    orig = provider._model_chain
+    provider._model_chain = lambda kw: ["fake/primary", "fake/backup"]
+    result = provider.generate("a cat")
+    provider._model_chain = orig
+    assert result["success"] is True, result
+    assert result["model"] == "fake/backup", result
+    assert tried == ["fake/primary", "fake/backup"], tried
+
+    def hard_error(method, url, headers, body):
+        if url.endswith("/v1/models/image"):
+            return _Resp({"data": [{"id": "fake/model-a"}]})
+        return _Resp({"error": {"message": "invalid prompt", "type": "invalid_request_error"}})
+
+    _install_transport(hard_error)
+    mod, provider = _load_provider()
+    provider._model_chain = lambda kw: ["fake/primary", "fake/backup"]
+    result = provider.generate("a cat")
+    assert result["success"] is False, result
+    assert result["model"] == "fake/primary", result  # no fallback on non-quota errors
+
+    # 8. _is_quota_error shapes
+    assert m._is_quota_error({"error": {"message": "429 Too Many Requests", "code": 429}})
+    assert m._is_quota_error({"error": {"message": "Quota exceeded for this model"}})
+    assert m._is_quota_error({"error": {"message": "rate limit reached", "code": "rate_limit_exceeded"}})
+    assert not m._is_quota_error({"error": {"message": "invalid prompt"}})
+    assert not m._is_quota_error(None)
+    assert not m._is_quota_error({})
+
     sys.modules["requests"] = real
     print("ALL CHECKS PASSED")
     return 0
