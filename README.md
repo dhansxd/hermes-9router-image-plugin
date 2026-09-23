@@ -8,7 +8,7 @@ Replaces the built-in image-generation backend: every `image_generate` call is s
 
 - Text-to-image only — `prompt` + `aspect_ratio` (`landscape` | `square` | `portrait`)
 - Model from config, or auto-discovered from the gateway's `/v1/models/image` catalog (cached 300s)
-- Returns a saved image file (b64 responses are decoded and written to the Hermes image cache) or a URL
+- Returns a saved image file: base64 responses are decoded; URL responses are downloaded into the Hermes image cache with SSRF and size checks. If URL caching fails, returns an error instead of an unsafe or expired URL.
 - Clear HTTP errors surfaced from the gateway
 - Zero extra dependencies — stdlib + `requests` (already in the Hermes runtime)
 - Windows / macOS / Linux

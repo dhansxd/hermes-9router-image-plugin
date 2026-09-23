@@ -19,9 +19,10 @@ for mod, attrs in {
     "agent.image_gen_provider": {
         "DEFAULT_ASPECT_RATIO": "landscape",
         "ImageGenProvider": object,
-        "error_response": lambda **kw: {"success": False, **{k: kw.get(k, "") for k in ("error", "error_type", "provider", "model", "prompt", "aspect_ratio")}},
+        "error_response": lambda **kw: {"success": False, "image": None, **{k: kw.get(k, "") for k in ("error", "error_type", "provider", "model", "prompt", "aspect_ratio")}},
         "resolve_aspect_ratio": lambda v: v if v in ("landscape", "square", "portrait") else "landscape",
         "save_b64_image": None,  # set below
+        "save_url_image": None,  # set below
         "success_response": lambda **kw: {"success": True, **kw},
     },
 }.items():
@@ -43,6 +44,17 @@ def _install_save_stub(tmp: Path):
         return path
 
     sys.modules["agent.image_gen_provider"].save_b64_image = save
+
+    def save_url(url: str, *, prefix: str = "image", **_kw) -> Path:
+        # Cheap stub: fail fast for invalid URLs (used by the failure test below),
+        # otherwise mimic caching by mapping the URL to a local path.
+        if url.startswith("bad"):
+            raise ValueError("injected cache failure")
+        path = tmp / f"{prefix}_cached.png"
+        path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
+        return path
+
+    setattr(sys.modules["agent.image_gen_provider"], "save_url_image", save_url)
 
 
 class _Resp:
@@ -108,7 +120,7 @@ def main() -> int:
     assert post[2]["model"] == "fake/model-a"
     assert post[2]["size"] == "1024x1024"
 
-    # 2. URL response path
+    # 2. URL response path → cached file (not bare URL)
     def url_handler(method, url, headers, body):
         if url.endswith("/v1/models/image"):
             return _Resp({"data": [{"id": "fake/model-a"}]})
@@ -118,7 +130,21 @@ def main() -> int:
     mod, provider = _load_provider()
     result = provider.generate("a cat", "landscape")
     assert result["success"] is True, result
-    assert result["image"] == "https://example.com/img.png"
+    assert Path(result["image"]).exists(), result
+    assert result["image"].endswith("_cached.png"), result
+
+    # 2b. URL cache failure → explicit error, never return unsafe or expired URL
+    def bad_url_handler(method, url, headers, body):
+        if url.endswith("/v1/models/image"):
+            return _Resp({"data": [{"id": "fake/model-a"}]})
+        return _Resp({"created": 1, "data": [{"url": "bad://example.com/img.png"}]})
+
+    _install_transport(bad_url_handler)
+    mod, provider = _load_provider()
+    result = provider.generate("a cat", "landscape")
+    assert result["success"] is False, result
+    assert result["image"] is None, result
+    assert "Could not cache" in result["error"] and "bad://" not in result["error"], result
 
     # 3. Provider error dict path (e.g. 429 quota)
     def err_handler(method, url, headers, body):

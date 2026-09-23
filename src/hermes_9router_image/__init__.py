@@ -27,6 +27,7 @@ from agent.image_gen_provider import (
     error_response,
     resolve_aspect_ratio,
     save_b64_image,
+    save_url_image,
     success_response,
 )
 
@@ -315,8 +316,13 @@ class NineRouterImageProvider(ImageGenProvider):
             return _fail("9Router returned no image data", "provider_error")
         entry = data[0]
         if entry.get("url"):
+            image_url = str(entry["url"])
+            try:
+                image = str(save_url_image(image_url, prefix="9router"))
+            except Exception as exc:  # noqa: BLE001 — fail closed; URL/errors may contain secrets
+                return _fail("Could not cache 9Router image URL", type(exc).__name__)
             return success_response(
-                image=str(entry["url"]),
+                image=image,
                 model=model_id,
                 prompt=prompt,
                 aspect_ratio=aspect_ratio,
