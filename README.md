@@ -15,15 +15,17 @@ Replaces the built-in image-generation backend: every `image_generate` call is s
 
 ## Install
 
-Copy (or symlink) this repo into your Hermes plugins directory as a `9router` backend:
+Install and enable through Hermes:
 
-```
-~/.hermes/plugins/image_gen/9router/
-├── plugin.yaml
-└── __init__.py        (this repo's src/hermes_9router_image/__init__.py)
+```bash
+hermes plugins install dhansxd/hermes-9router-image-plugin --enable --yes-deps
+hermes plugins doctor 9router --ci
 ```
 
-Or install the package and point `plugins.enabled` at it.
+Git installs include a root `__init__.py` that imports the implementation from
+`src/hermes_9router_image`. No manual file copies or symlinks are required.
+Alternatively, copy the complete repository into `$HERMES_HOME/plugins/9router/`
+and enable `9router`. Do not enable the pip entry-point alias as well.
 
 ## Configure
 

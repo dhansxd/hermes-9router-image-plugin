@@ -219,6 +219,22 @@ def main() -> int:
     assert not m._is_quota_error({})
 
     sys.modules["requests"] = real
+
+    # A fresh Git install must register without manual symlinks.
+    import importlib.util
+    import types
+    root = Path(__file__).resolve().parents[1]
+    assert (root / "__init__.py").is_file(), "Git plugin root entry point missing"
+    spec = importlib.util.spec_from_file_location(
+        "nine_router_install", root / "__init__.py", submodule_search_locations=[str(root)]
+    )
+    assert spec is not None and spec.loader is not None
+    installed = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = installed
+    spec.loader.exec_module(installed)
+    registered = []
+    installed.register(types.SimpleNamespace(register_image_gen_provider=registered.append))
+    assert len(registered) == 1 and registered[0].name == "9router"
     print("ALL CHECKS PASSED")
     return 0
 
