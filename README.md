@@ -67,7 +67,7 @@ Hermes passes the native `image_gen.model` selection as the provider's `model` a
 
 Keep `9router` and existing `image_gen.9router` settings. Lower-precedence config/env defaults are no longer implicit fallback models; put desired alternatives in `fallback_models`. A single retry without `size`/`n` is retained only for an exact unsupported-parameter/schema rejection identifying those fields (HTTP 400/422). Generic “not allowed”, ACL, prompt, model and other validation errors do not qualify. Successful results report `parameters_omitted: ["size", "n"]` when this retry was needed; `aspect_ratio_advisory: true` makes the model-dependent dimension limitation explicit.
 
-The optional pip entry-point name is now `9router`, matching Git installs. If an earlier pip distribution was enabled as `hermes_9router_image`, disable that old alias **before** upgrading the distribution, then enable `9router` afterward. If already upgraded, the stale old enabled-list entry is inert and can be removed from the active profile configuration. Use one installation source; do not enable duplicate Git and pip copies.
+For existing pip installations, the entry-point/activation alias remains `hermes_9router_image`; the native image provider selector and config namespace remain `9router`. Git installs use the manager ID `9router`. Use one installation source; do not enable duplicate Git and pip copies.
 
 ## Verification
 
