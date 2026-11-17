@@ -101,7 +101,7 @@ def _is_quota_error(status: int, body: Dict[str, Any]) -> bool:
     # 9Router also labels some permission failures insufficient_quota: HTTP wins.
     if status == 429:
         return True
-    if not 200 <= status < 300:
+    if not (200 <= status < 300 or status == 402 or status >= 500):
         return False
     err = body.get("error")
     if not isinstance(err, dict):
@@ -114,6 +114,39 @@ def _is_quota_error(status: int, body: Dict[str, Any]) -> bool:
         "rate_limit", "rate_limit_error", "quota_exceeded",
     ) or bool(re.search(r"\bquota\b|\brate[\s_-]*limit\b|\btoo many requests\b",
                         str(err.get("message") or ""), re.IGNORECASE)))
+
+
+def _size_schema_rejected(status: int, body: Dict[str, Any]) -> bool:
+    """Only a definite unsupported size/n field permits one bare-payload retry."""
+    if status not in (400, 422):
+        return False
+    error = body.get("error")
+    if not isinstance(error, dict):
+        return False
+    if str(error.get("type") or "").lower() in ("permission_error", "authentication_error"):
+        return False
+    field = str(error.get("param") or error.get("parameter") or "").lower()
+    code = str(error.get("code") or "").lower()
+    if field in ("size", "n") and code in (
+        "unknown_parameter", "unsupported_parameter", "unrecognized_parameter", "extra_forbidden",
+    ):
+        return True
+    message = str(error.get("message") or "")
+    # Exact schema-error phrasings, not generic "not allowed" permission text.
+    if re.search(
+        r"\b(?:unknown|unsupported|unrecognized|unexpected) (?:parameter|field|argument)"
+        r"(?: supplied)?\s*[:=]?\s*['\"]?(?:size|n)['\"]?(?:[.\s]|$)",
+        message, re.IGNORECASE,
+    ):
+        return True
+    extras = re.search(
+        r"additional properties are not allowed\s*\((.*?)\s+(?:was|were) unexpected\)",
+        message, re.IGNORECASE,
+    )
+    if extras:
+        names = re.findall(r"['\"]([^'\"]+)['\"]", extras.group(1))
+        return bool(names) and set(names) <= {"size", "n"}
+    return False
 
 
 def _request_json(
@@ -131,19 +164,24 @@ def _request_json(
                 allow_redirects=False, stream=True,
             ) as response:
                 status = response.status_code
-                # No raw gateway error body is needed or exposed.
-                if not 200 <= status < 300:
-                    return status, {}
+                success = 200 <= status < 300
+                limit = _MAX_JSON_BYTES if success else 64 * 1024
                 raw = bytearray()
                 for chunk in response.iter_content(chunk_size=64 * 1024):
                     raw.extend(chunk)
-                    if len(raw) > _MAX_JSON_BYTES:
+                    if len(raw) > limit:
+                        if not success:
+                            return status, {}
                         raise _ProviderError("9Router JSON response is too large", "invalid_response")
                 try:
                     body = json.loads(raw)
                 except (ValueError, UnicodeError):
+                    if not success:
+                        return status, {}
                     raise _ProviderError("9Router returned invalid JSON", "invalid_response") from None
                 if not isinstance(body, dict):
+                    if not success:
+                        return status, {}
                     raise _ProviderError("9Router returned a non-object response", "invalid_response")
                 return status, body
     except _ProviderError:
@@ -362,6 +400,12 @@ class NineRouterImageProvider(ImageGenProvider):
                     "POST", f"{base}/v1/images/generations", headers=headers, timeout=timeout,
                     json_body={"model": model_id, "prompt": text, "size": _ASPECT_TO_SIZE[aspect], "n": 1},
                 )
+                omitted_size = _size_schema_rejected(status, body)
+                if omitted_size:
+                    status, body = _request_json(
+                        "POST", f"{base}/v1/images/generations", headers=headers, timeout=timeout,
+                        json_body={"model": model_id, "prompt": text},
+                    )
                 if not 200 <= status < 300 or "error" in body:
                     quota = _is_quota_error(status, body)
                     if quota and index + 1 < len(chain):
@@ -385,7 +429,10 @@ class NineRouterImageProvider(ImageGenProvider):
                     return fail("9Router response has neither url nor b64_json", "invalid_response")
                 return success_response(
                     image=image, model=model_id, prompt=text, aspect_ratio=aspect,
-                    provider=self.name, extra={"format": extension},
+                    provider=self.name, extra={
+                        "format": extension, "aspect_ratio_advisory": True,
+                        "parameters_omitted": ["size", "n"] if omitted_size else [],
+                    },
                 )
             except _ProviderError as exc:
                 return fail(str(exc), exc.error_type)

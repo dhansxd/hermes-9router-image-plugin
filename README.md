@@ -60,12 +60,12 @@ Hermes passes the native `image_gen.model` selection as the provider's `model` a
 - Supports normalized `data[].b64_json` and `data[].url` responses. PNG/JPEG/WebP/GIF signatures determine the saved extension; unknown bytes, invalid base64 and images over 25 MB are rejected. Signature checks are not a full image decode.
 - Saves to the native active-profile `cache/generated/images/` directory. Base64 writes publish atomically. URL outputs use Hermes' download helper and its SSRF, redirect and size checks, then receive signature validation. Invalid downloaded files are removed; a failed download returns an error.
 - Gateway keys are never sent to returned image URLs. Gateway API requests do not follow redirects and do not use environment proxies or netrc credentials. JSON responses are capped at 36 MB.
-- Fallback tries only explicitly configured `fallback_models`, after HTTP 429 or a structured quota/rate-limit error in a successful JSON response. HTTP 401/403 and other hard errors stop immediately. Timeouts, invalid output and cache failures do not trigger another generation request.
+- Fallback tries only explicitly configured `fallback_models`, after HTTP 429 or a proven structured quota/rate-limit error with HTTP 402, 5xx, or a successful JSON response. HTTP 401/403 and other hard errors stop immediately. Timeouts, invalid output and cache failures do not trigger another generation request.
 - Gateway errors expose safe status/category messages, without raw upstream bodies, returned URLs or transport exception text. Async upstream polling is handled by 9Router.
 
 ## Upgrade from 0.1.0
 
-Keep `9router` and existing `image_gen.9router` settings. Lower-precedence config/env defaults are no longer implicit fallback models; put desired alternatives in `fallback_models`. Schema-rejection retries that silently dropped size/count have been removed; fix the model/gateway request when it returns HTTP 400.
+Keep `9router` and existing `image_gen.9router` settings. Lower-precedence config/env defaults are no longer implicit fallback models; put desired alternatives in `fallback_models`. A single retry without `size`/`n` is retained only for an exact unsupported-parameter/schema rejection identifying those fields (HTTP 400/422). Generic “not allowed”, ACL, prompt, model and other validation errors do not qualify. Successful results report `parameters_omitted: ["size", "n"]` when this retry was needed; `aspect_ratio_advisory: true` makes the model-dependent dimension limitation explicit.
 
 The optional pip entry-point name is now `9router`, matching Git installs. If an earlier pip distribution was enabled as `hermes_9router_image`, disable that old alias **before** upgrading the distribution, then enable `9router` afterward. If already upgraded, the stale old enabled-list entry is inert and can be removed from the active profile configuration. Use one installation source; do not enable duplicate Git and pip copies.
 

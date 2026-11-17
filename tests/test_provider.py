@@ -165,6 +165,43 @@ class ProviderTests(unittest.TestCase):
         self.assertNotIn("secret-token", json.dumps(result))
         self.assertNotIn("_quota_probe", result)
 
+    def test_structured_quota_fallback_on_402_and_503(self):
+        self.settings["fallback_models"] = ["another-provider/backup"]
+        quota = {"error": {"code": "insufficient_quota", "message": "secret-quota-detail"}}
+        for status in (402, 503):
+            with self.subTest(status=status):
+                with patch.object(plugin, "_request_json", side_effect=[(status, quota), (200, IMAGE)]):
+                    result = self.generate()
+                self.assertTrue(result["success"], result)
+                self.assertEqual(result["model"], "another-provider/backup")
+                self.assertNotIn("secret-quota-detail", json.dumps(result))
+
+    def test_narrow_size_schema_retry_reports_omitted_parameters(self):
+        rejected = {"error": {"message": "Additional properties are not allowed ('size', 'n' were unexpected)"}}
+        with patch.object(plugin, "_request_json", side_effect=[(400, rejected), (200, IMAGE)]) as request:
+            result = self.generate()
+        self.assertTrue(result["success"], result)
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(request.call_args.kwargs["json_body"], {
+            "model": "provider/primary", "prompt": "a test image",
+        })
+        self.assertEqual(result["parameters_omitted"], ["size", "n"])
+        self.assertTrue(result["aspect_ratio_advisory"])
+        self.assertTrue(plugin._size_schema_rejected(
+            422, {"error": {"code": "unsupported_parameter", "param": "size"}},
+        ))
+        for body in (
+            {"error": {"message": "model not allowed"}},
+            {"error": {"message": "Unknown parameter: prompt"}},
+            {"error": {"message": "Additional properties are not allowed ('size', 'prompt' were unexpected)"}},
+            {"error": {"type": "permission_error", "code": "unsupported_parameter", "param": "size"}},
+        ):
+            self.assertFalse(plugin._size_schema_rejected(400, body))
+        self.assertFalse(plugin._size_schema_rejected(403, rejected))
+        with patch.object(plugin, "_request_json", return_value=(400, rejected)) as request:
+            self.assertFalse(self.generate()["success"])
+            self.assertEqual(request.call_count, 2)  # At most one bare retry.
+
     def test_no_schema_retry_and_malformed_data(self):
         for status, body in [(400, {"error": {"message": "size not allowed secret"}}),
                              (500, IMAGE), (200, {"data": {"0": IMAGE["data"][0]}})]:
@@ -259,14 +296,18 @@ class ProviderTests(unittest.TestCase):
 
     def test_http_closes_resources_blocks_redirects_and_netrc(self):
         for response in (Response(status=429, raw=b"not json"),
-                         Response(status=302, raw=b"redirect"), Response(body=IMAGE)):
+                         Response(status=302, raw=b"redirect"),
+                         Response(status=503, body={"error": {"code": "insufficient_quota"}}),
+                         Response(body=IMAGE)):
             session = Session(response)
             with patch("requests.Session", return_value=session):
-                status, _ = plugin._request_json(
+                status, body = plugin._request_json(
                     "POST", "https://gateway.invalid/v1/images/generations",
                     headers={"Authorization": "Bearer fake-key"}, timeout=10,
                 )
             self.assertEqual(status, response.status_code)
+            if status == 503:
+                self.assertEqual(body["error"]["code"], "insufficient_quota")
             self.assertFalse(session.trust_env)
             self.assertFalse(session.calls[0][1]["allow_redirects"])
             self.assertTrue(session.closed and response.closed)
