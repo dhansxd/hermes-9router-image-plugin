@@ -12,6 +12,7 @@ import re
 import tempfile
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit, urlunsplit
@@ -25,7 +26,7 @@ from agent.image_gen_provider import (
     save_url_image,
     success_response,
 )
-from agent.provider_media import cache_path
+from agent.provider_media import cache_dir, cache_path
 from agent.secret_scope import get_secret
 from hermes_cli.config import load_config
 from hermes_constants import get_hermes_home
@@ -191,11 +192,14 @@ def _save_b64_image(value: str) -> Tuple[str, str]:
 def _cache_url_image(value: str, timeout: float) -> Tuple[str, str]:
     # Hermes validates each URL/redirect and enforces its SSRF/size rules.
     # Never attach the configured gateway Authorization header to this URL.
-    path = Path(save_url_image(
-        value, prefix="9router", timeout=timeout, max_bytes=_MAX_IMAGE_BYTES,
-    ))
-    destination = path
+    prefix = "9router_" + uuid.uuid4().hex
+    directory = cache_dir("generated/images")
+    path = destination = None
     try:
+        path = Path(save_url_image(
+            value, prefix=prefix, timeout=timeout, max_bytes=_MAX_IMAGE_BYTES,
+        ))
+        destination = path
         with path.open("rb") as source:
             raw = source.read(_MAX_IMAGE_BYTES + 1)
         if not raw or len(raw) > _MAX_IMAGE_BYTES:
@@ -206,9 +210,15 @@ def _cache_url_image(value: str, timeout: float) -> Tuple[str, str]:
             path.replace(destination)
         return str(destination), extension
     except Exception:
-        path.unlink(missing_ok=True)
-        if destination != path:
-            destination.unlink(missing_ok=True)
+        # The native helper can fail after creating a partial file but before
+        # returning its name. A unique per-call prefix confines cleanup safely.
+        candidates = set(directory.glob(prefix + "_*"))
+        candidates.update(item for item in (path, destination) if item is not None)
+        for candidate in candidates:
+            try:
+                candidate.unlink(missing_ok=True)
+            except OSError:
+                pass
         raise
 
 

@@ -242,6 +242,21 @@ class ProviderTests(unittest.TestCase):
                 plugin._cache_url_image("https://cdn.invalid/image", 10)
         self.assertFalse(cached.exists())
 
+    def test_partial_url_download_is_cleaned_without_touching_other_calls(self):
+        directory = self.home / "cache/generated/images"
+        directory.mkdir(parents=True)
+        other = directory / "9router_another_call.png"
+        other.write_bytes(PNG)
+
+        def interrupted(url, *, prefix, **kwargs):
+            (directory / (prefix + "_partial.png")).write_bytes(b"partial")
+            raise OSError("secret download URL")
+
+        with patch.object(plugin, "save_url_image", side_effect=interrupted):
+            with self.assertRaises(OSError):
+                plugin._cache_url_image("https://cdn.invalid/image", 10)
+        self.assertEqual(list(directory.iterdir()), [other])
+
     def test_http_closes_resources_blocks_redirects_and_netrc(self):
         for response in (Response(status=429, raw=b"not json"),
                          Response(status=302, raw=b"redirect"), Response(body=IMAGE)):

@@ -67,7 +67,7 @@ Hermes passes the native `image_gen.model` selection as the provider's `model` a
 
 Keep `9router` and existing `image_gen.9router` settings. Lower-precedence config/env defaults are no longer implicit fallback models; put desired alternatives in `fallback_models`. Schema-rejection retries that silently dropped size/count have been removed; fix the model/gateway request when it returns HTTP 400.
 
-The optional pip entry-point name is now `9router`, matching Git installs. If an earlier pip distribution was enabled as `hermes_9router_image`, disable that old alias and enable `9router` after upgrading. Use one installation source; do not enable duplicate Git and pip copies.
+The optional pip entry-point name is now `9router`, matching Git installs. If an earlier pip distribution was enabled as `hermes_9router_image`, disable that old alias **before** upgrading the distribution, then enable `9router` afterward. If already upgraded, the stale old enabled-list entry is inert and can be removed from the active profile configuration. Use one installation source; do not enable duplicate Git and pip copies.
 
 ## Verification
 
